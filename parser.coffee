@@ -30,7 +30,7 @@ Parser = factory (self) ->
     # Configuration State...
 
     keywords = []
-    constants = {}
+    namedLiterals = {}
     namedOperators = []
     symbolicOperators = {}
     prefixHandlers = {}
@@ -99,12 +99,12 @@ Parser = factory (self) ->
             token.left = left
             token.updateStartPosition token, left
 
-    self.createTerminal = (terminal, handler=undefined) ->
-        self.createNamedPrefix terminal, 0, handler or upgrade ->
+    self.createNamedLiteral = (name, type) ->
+        namedLiterals[name] = type
+        prefixHandlers[name] = upgrade ->
 
-    self.createConstant = (name, type) ->
-        prefixHandlers[type] = upgrade ->
-        constants[name] = type
+    self.createTerminal = (name, handler=undefined) ->
+        self.createNamedPrefix name, 0, handler or upgrade ->
 
     self.createNamedOperatorToken = (name) ->
         self.createNamedPrefix name
@@ -246,9 +246,8 @@ Parser = factory (self) ->
 
                 gatherWhile -> char in laterNameChars
                 yield Token(
-                    if word in keywords then word
-                    else if word in namedOperators then word
-                    else if word of constants then constants[word]
+                    if word in keywords or word in namedOperators then word
+                    else if word in namedLiterals then namedLiterals[word]
                     else "Identifier"
                     )
 
@@ -259,7 +258,10 @@ Parser = factory (self) ->
                     else if char is dot and dot not in word
                         peek() in digits
                     else false
-                yield Token "numberLiteral"
+                token = Token "NumericLiteral"
+                token.extra = raw: token.value, rawValue: Number token.value
+                self.value = Number token.value
+                yield token
 
             else if char is hash
 
@@ -298,18 +300,22 @@ Parser = factory (self) ->
             else if char in quotes
 
                 delimiter = char
+                raw = char
                 escaping = false
                 updatePosition()
                 advance()
                 until (char is undefined) or (char is delimiter and not escaping)
+                    raw += char
                     if escaping
                         word += escapees[char]
                         escaping = false
                     else if char is escape then escaping = true
                     else word += char
                     advance()
-                yield Token "stringLiteral"
+                token = Token "StringLiteral"
+                token.extra = raw: raw + delimiter, rawValue: token.value
                 advance()
+                yield token
 
             else
 
@@ -399,12 +405,14 @@ Parser = factory (self) ->
 
 api = Parser()
 
-# type of operator              # name              # symbol    # precedence
-api.createConstant              "true",             "bool"
-api.createConstant              "false",            "bool"
+api.createTerminal "NumericLiteral"
+api.createTerminal "StringLiteral"
+
+api.createNamedLiteral "null",  "NullLiteral"
+api.createNamedLiteral "true",  "BooleanLiteral"
+api.createNamedLiteral "false", "BooleanLiteral"
 
 # type of operator              # name              # n/a       # precedence
-api.createTerminal              "numberLiteral"
 api.createTerminal              "stringLiteral"
 
 # type of operator              # name              # n/a       # precedence
@@ -472,8 +480,6 @@ api.createTerminal "Identifier", upgrade (self) ->
 api.createTerminal "undefined", upgrade (self) ->
     self.type = "Identifier"
     self.name = self.value
-
-#api.createConstant "null", "null"
 
 api.createGoofySymbolicPrefix "plus", "+", 150, upgrade (self) ->
     self.type = "positive"
@@ -580,11 +586,10 @@ api.createNamedInfix "not", 110, upgrade (self, left) ->
 # Test Code...
 
 source = """
-a * foo + x
+10 + 'foobar'
 """
 
 fs = require "fs"
 babel = require "babel-core"
-ast = api.compile source
+inspect ast = api.compile source
 put (babel.transformFromAst ast).code
-#fs.writeFile "output.txt", JSON.stringify api.compile source
