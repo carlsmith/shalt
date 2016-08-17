@@ -480,12 +480,12 @@ api.createTerminal "undefined", upgrade (self) ->
 
 api.createGoofySymbolicPrefix "plus", "+", 150, upgrade (self) ->
     self.type = "positive"
-    self.right = self.subparse Infinity #self.lbp - 1
+    self.right = self.subparse Infinity
     self.updateEndPosition self, self.right
 
 api.createGoofySymbolicPrefix "minus", "-", 150, upgrade (self) ->
     self.type = "negative"
-    self.right = self.subparse Infinity #self.lbp -1
+    self.right = self.subparse Infinity
     self.updateEndPosition self, self.right
 
 api.createNamedPrefix "for", 0, upgrade (self) ->
