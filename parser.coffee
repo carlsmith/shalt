@@ -534,22 +534,41 @@ api.createNamedPrefix "yield", 2, upgrade (self) ->
     self.right = self.subparse self.lbp - 1
     self.updateEndPosition self, self.right
 
-api.createSymbolicPrefix "lambda", "->", 0, upgrade (self) ->
-    self.right = self.subparse 0
-    self.updateEndPosition self, self.right
-
-api.createSymbolicInfix "lambda", "->", 0, upgrade (self, left) ->
-    if left.type is "group" then self.args = left.args
-    else if left.type is "identifier" then self.args = [left]
-    else throw "invalid args"
-    self.right = self.subparse 0
+api.createSymbolicInfix "colon", ":", 5, upgrade (self, left) ->
+    self.type = "ObjectProperty"
+    self.key = left
+    self.value = self.subparse 0
+    self.method = false
+    self.shorthand = false
+    self.computed = false
     self.updateStartPosition self, left
-    self.updateEndPosition self, self.right
+    self.updateEndPosition self, self.value
+
+api.createSymbolicPrefix "lambda", "->", Infinity, upgrade (self) ->
+    self.type = "ArrowFunctionExpression"
+    self.generator = false
+    self.expression = true
+    self.async = false
+    self.params = []
+    self.body = self.subparse 0
+    self.updateEndPosition self, self.body
+
+api.createSymbolicInfix "lambda", "->", Infinity, upgrade (self, left) ->
+    self.type = "ArrowFunctionExpression"
+    self.generator = false
+    self.expression = true
+    self.async = false
+    if left.type is "SequenceExpression" then self.params = left.expressions
+    else self.params = [left]
+    self.body = self.subparse 0
+    self.updateStartPosition self, left
+    self.updateEndPosition self, self.body
 
 api.createSymbolicPrefix "openParen", "(", 190, upgrade (self) ->
-    self.type = "Group"
-    self.block = []
-    self.gatherGroup self, self.block
+    self.type = "SequenceExpression"
+    self.extra = parenthesized: true, parenStart: 0
+    self.expressions = []
+    self.gatherGroup self, self.expressions
 
 api.createSymbolicInfix "openParen", "(", 170, upgrade (self, left) ->
     self.type = "CallExpression"
@@ -565,30 +584,44 @@ api.createSymbolicPrefix "openBracket", "[", 0, upgrade (self) ->
 
 api.createSymbolicInfix "openBracket", "[", 180, upgrade (self, left) ->
     self.type = "MemberExpression"
+    self.computed = true
     self.object = left
-    self.property = []
-    self.gatherArray self, self.property
+    self.property = self.subparse 0
+    self.advance "closeBracket"
     self.updateStartPosition self, left
+    self.updateEndPosition self, self.property
 
 api.createSymbolicPrefix "openBrace", "{", 0, upgrade (self) ->
-    self.type = "ScopeLiteral"
-    self.args = []
-    self.gatherBlock self, self.args
+    self.type = "ObjectExpression"
+    self.properties = []
+    self.gatherBlock self, self.properties
 
 api.createNamedInfix "not", 110, upgrade (self, left) ->
     self.advance "in"
-    self.type = "NotIn"
-    self.left = left
-    self.right = self.subparse self.lbp
+    right = self.subparse self.lbp
+    self.type = "UnaryExpression"
+    self.operator = "!"
+    self.prefix = true
+    self.extra = parenthesizedArgument: true
+    self.argument = {}
+    self.argument.type = "BinaryExpression"
+    self.argument.operator = "in"
+    self.argument.left = left
+    self.argument.right = right
+    self.argument.start = left.start
+    self.argument.end = right.end
+    self.argument.loc = {
+        start: line: left.loc.start.line, column: left.loc.start.column
+        end: line: right.loc.end.line, column: right.loc.end.column
+    }
     self.updateStartPosition self, left
-    self.updateEndPosition self, self.right
+    self.updateEndPosition self, right
 
 # Test Code...
 
 source = """
-10 + 'foobar'
+square = x -> x * x
 """
-
 fs = require "fs"
 babel = require "babel-core"
 inspect ast = api.compile source
