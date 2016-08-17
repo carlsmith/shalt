@@ -99,11 +99,11 @@ Parser = factory (self) ->
             token.left = left
             token.updateStartPosition token, left
 
-    self.createNamedLiteral = (name, type) ->
+    self.createNamedLiteral = (name, type, handler=undefined) ->
         namedLiterals[name] = type
-        prefixHandlers[name] = upgrade ->
+        prefixHandlers[type] = handler or upgrade ->
 
-    self.createTerminal = (name, handler=undefined) ->
+    self.createTerminalType = (name, handler=undefined) ->
         self.createNamedPrefix name, 0, handler or upgrade ->
 
     self.createNamedOperatorToken = (name) ->
@@ -153,6 +153,21 @@ Parser = factory (self) ->
         token.test = token.subparse token.lbp
         token.advance "openBrace"
         token.gatherBlock token, target
+
+    # Core Grammar...
+
+    namedLiterals["null"] = "NullLiteral"
+    prefixHandlers["NullLiteral"] = upgrade ->
+
+    namedLiterals["true"] = "TrueLiteral"
+    prefixHandlers["TrueLiteral"] = upgrade (self) ->
+        self.type = "BooleanLiteral"
+        self.value = true
+
+    namedLiterals["false"] = "FalseLiteral"
+    prefixHandlers["FalseLiteral"] = upgrade (self) ->
+        self.type = "BooleanLiteral"
+        self.value = false
 
     # The Lexer Function...
 
@@ -247,7 +262,7 @@ Parser = factory (self) ->
                 gatherWhile -> char in laterNameChars
                 yield Token(
                     if word in keywords or word in namedOperators then word
-                    else if word in namedLiterals then namedLiterals[word]
+                    else if word of namedLiterals then namedLiterals[word]
                     else "Identifier"
                     )
 
@@ -405,12 +420,7 @@ Parser = factory (self) ->
 
 api = Parser()
 
-api.createTerminal "NumericLiteral"
-api.createTerminal "StringLiteral"
-
-api.createNamedLiteral "null",  "NullLiteral"
-api.createNamedLiteral "true",  "BooleanLiteral"
-api.createNamedLiteral "false", "BooleanLiteral"
+api.createTerminalType "StringLiteral"
 
 # type of operator              # name              # n/a       # precedence
 api.createPredicatedBlock       "while",                        Infinity
@@ -471,12 +481,15 @@ api.createAssignmentOperator    "moduloAssign",     "%=",       30
 
 # Define Unique Constructs...
 
-api.createTerminal "Identifier", upgrade (self) ->
+api.createTerminalType "Identifier", upgrade (self) ->
     self.name = self.value
 
-api.createTerminal "undefined", upgrade (self) ->
+api.createTerminalType "undefined", upgrade (self) ->
     self.type = "Identifier"
     self.name = self.value
+
+api.createTerminalType "NumericLiteral", upgrade (self) ->
+    self.value = Number self.value
 
 api.createGoofySymbolicPrefix "plus", "+", 150, upgrade (self) ->
     self.type = "positive"
@@ -517,9 +530,8 @@ api.createNamedPrefix "function", 0, upgrade (self) ->
     self.params = []
     self.body = []
     unless self.peek().type is "openBrace" then loop
-        self.params.push self.subparse()
-        nextToken = self.peek()
-        if nextToken.value is "," then self.advance "endStatement" else break
+        self.params.push self.subparse 0
+        if self.peek().value is "," then self.advance "endStatement" else break
     self.advance "openBrace"
     self.gatherBlock self, self.body
 
@@ -617,7 +629,7 @@ api.createNamedInfix "not", 110, upgrade (self, left) ->
 # Test Code...
 
 source = """
-square = x -> x * x
+true + false + null
 """
 fs = require "fs"
 babel = require "babel-core"
