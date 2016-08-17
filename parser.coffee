@@ -55,8 +55,7 @@ Parser = factory (self) ->
                 token.operator = symbol
                 token.left = left
                 token.right = token.subparse token.lbp - goofy
-                token.updateStartPosition token, left
-                token.updateEndPosition token, token.right
+                self.updateBoundaryPositions token, left, token.right
 
     createNamedPrefix = (goofy) ->
         (name, lbp=0, handler=undefined) ->
@@ -72,8 +71,7 @@ Parser = factory (self) ->
             infixHandlers[name] = handler or upgrade (token, left) ->
                 token.left = left
                 token.right = token.subparse token.lbp
-                token.updateStartPosition token, left
-                token.updateEndPosition token, token.right
+                self.updateBoundaryPositions token, left, token.right
 
     # The High Level API Functions...
 
@@ -99,32 +97,29 @@ Parser = factory (self) ->
             token.left = left
             token.updateStartPosition token, left
 
-    self.createNamedLiteral = (name, type, handler=undefined) ->
-        namedLiterals[name] = type
-        prefixHandlers[type] = handler or upgrade ->
-
-    self.createTerminalType = (name, handler=undefined) ->
-        self.createNamedPrefix name, 0, handler or upgrade ->
-
     self.createNamedOperatorToken = (name) ->
         self.createNamedPrefix name
 
-    self.createPredicatedBlock = (name, lbp) ->
+    self.createPredicatedBlock = (name, lbp=Infinity) ->
         self.createNamedPrefix name, lbp, upgrade (token) ->
             token.block = []
             token.gatherPredicatedBlock token, token.block
 
     # The Low Level API Functions...
 
-    self.updateStartPosition = upgrade (token, openingToken) ->
-        token.start = openingToken.start
-        token.loc.start.line = openingToken.loc.start.line
-        token.loc.start.column = openingToken.loc.start.column
+    self.updateStartPosition = upgrade (token, startToken) ->
+        token.start = startToken.start
+        token.loc.start.line = startToken.loc.start.line
+        token.loc.start.column = startToken.loc.start.column
 
-    self.updateEndPosition = upgrade (token, closingToken) ->
-        token.end = closingToken.end
-        token.loc.end.line = closingToken.loc.end.line
-        token.loc.end.column = closingToken.loc.end.column
+    self.updateEndPosition = upgrade (token, endToken) ->
+        token.end = endToken.end
+        token.loc.end.line = endToken.loc.end.line
+        token.loc.end.column = endToken.loc.end.column
+
+    self.updateBoundaryPositions = (token, startToken, endToken) ->
+        self.updateStartPosition token, startToken
+        self.updateEndPosition token, endToken
 
     self.handlePrefix = (token) ->
         prefixHandlers[token.type] token
@@ -154,7 +149,15 @@ Parser = factory (self) ->
         token.advance "openBrace"
         token.gatherBlock token, target
 
-    # Core Grammar...
+    # Define the Terminals for the Core Grammar...
+
+    prefixHandlers["Identifier"] = upgrade (self) ->
+        self.name = self.value
+
+    namedLiterals["undefined"] = "UndefinedLiteral"
+    prefixHandlers["UndefinedLiteral"] = upgrade (self) ->
+        self.type = "Identifier"
+        self.name = self.value
 
     namedLiterals["null"] = "NullLiteral"
     prefixHandlers["NullLiteral"] = upgrade ->
@@ -168,6 +171,11 @@ Parser = factory (self) ->
     prefixHandlers["FalseLiteral"] = upgrade (self) ->
         self.type = "BooleanLiteral"
         self.value = false
+
+    prefixHandlers["NumericLiteral"] = upgrade (self) ->
+        self.value = Number self.value
+
+    prefixHandlers["StringLiteral"] = upgrade ->
 
     # The Lexer Function...
 
@@ -395,10 +403,11 @@ Parser = factory (self) ->
         self.advance()
 
         while (token is undefined) or (token.type isnt "endFile")
-            expression = self.subparse()
-            yield Statement expression
-            unless expression.type is "if"
-                self.advance "endStatement", "endFile"
+            statement = self.subparse()
+            if statement.type is "ReturnStatement" then yield statement
+            else yield Statement statement
+            continue if statement.type is "if"
+            self.advance "endStatement", "endFile"
 
     # API Wrapper Functions...
 
@@ -420,10 +429,8 @@ Parser = factory (self) ->
 
 api = Parser()
 
-api.createTerminalType "StringLiteral"
-
-# type of operator              # name              # n/a       # precedence
-api.createPredicatedBlock       "while",                        Infinity
+# type of operator              # name              # n/a       # n/a
+api.createPredicatedBlock       "while"
 
 # type of operator              # name              # n/a       # precedence
 api.createGoofyNamedPrefix      "void",                         150
@@ -481,16 +488,6 @@ api.createAssignmentOperator    "moduloAssign",     "%=",       30
 
 # Define Unique Constructs...
 
-api.createTerminalType "Identifier", upgrade (self) ->
-    self.name = self.value
-
-api.createTerminalType "undefined", upgrade (self) ->
-    self.type = "Identifier"
-    self.name = self.value
-
-api.createTerminalType "NumericLiteral", upgrade (self) ->
-    self.value = Number self.value
-
 api.createGoofySymbolicPrefix "plus", "+", 150, upgrade (self) ->
     self.type = "positive"
     self.right = self.subparse Infinity
@@ -500,6 +497,11 @@ api.createGoofySymbolicPrefix "minus", "-", 150, upgrade (self) ->
     self.type = "negative"
     self.right = self.subparse Infinity
     self.updateEndPosition self, self.right
+
+api.createNamedPrefix "return", Infinity, upgrade (self) ->
+    self.type = "ReturnStatement"
+    self.argument = self.subparse 0
+    self.updateEndPosition self, self.argument
 
 api.createNamedPrefix "for", 0, upgrade (self) ->
     predicate = self.subparse self.lbp
@@ -527,15 +529,19 @@ api.createNamedPrefix "if", 0, upgrade (self) ->
 api.createNamedOperatorToken "else"
 
 api.createNamedPrefix "function", 0, upgrade (self) ->
+    self.type = "FunctionExpression"
+    self.generator = false
+    self.expression = false
+    self.async = false
     self.params = []
-    self.body = []
+    self.body = type: "BlockStatement", body: []
     unless self.peek().type is "openBrace" then loop
         self.params.push self.subparse 0
         if self.peek().value is "," then self.advance "endStatement" else break
     self.advance "openBrace"
-    self.gatherBlock self, self.body
+    self.gatherBlock self, self.body.body
 
-api.createNamedPrefix "yield", 2, upgrade (self) ->
+api.createNamedPrefix "yield", 20, upgrade (self) ->
     if self.peek().type is "times"
         self.type = "yieldAll"
         self.value = "yield *"
@@ -550,8 +556,7 @@ api.createSymbolicInfix "colon", ":", 5, upgrade (self, left) ->
     self.method = false
     self.shorthand = false
     self.computed = false
-    self.updateStartPosition self, left
-    self.updateEndPosition self, self.value
+    self.updateBoundaryPositions self, left, self.value
 
 api.createSymbolicPrefix "lambda", "->", Infinity, upgrade (self) ->
     self.type = "ArrowFunctionExpression"
@@ -570,8 +575,7 @@ api.createSymbolicInfix "lambda", "->", Infinity, upgrade (self, left) ->
     if left.type is "SequenceExpression" then self.params = left.expressions
     else self.params = [left]
     self.body = self.subparse 0
-    self.updateStartPosition self, left
-    self.updateEndPosition self, self.body
+    self.updateBoundaryPositions self, left, self.body
 
 api.createSymbolicPrefix "openParen", "(", 190, upgrade (self) ->
     self.type = "SequenceExpression"
@@ -597,8 +601,7 @@ api.createSymbolicInfix "openBracket", "[", 180, upgrade (self, left) ->
     self.object = left
     self.property = self.subparse 0
     self.advance "closeBracket"
-    self.updateStartPosition self, left
-    self.updateEndPosition self, self.property
+    self.updateBoundaryPositions self, left, self.property
 
 api.createSymbolicPrefix "openBrace", "{", 0, upgrade (self) ->
     self.type = "ObjectExpression"
@@ -623,13 +626,12 @@ api.createNamedInfix "not", 110, upgrade (self, left) ->
         start: line: left.loc.start.line, column: left.loc.start.column
         end: line: right.loc.end.line, column: right.loc.end.column
     }
-    self.updateStartPosition self, left
-    self.updateEndPosition self, right
+    self.updateBoundaryPositions self, left, right
 
 # Test Code...
 
 source = """
-true + false + null
+x not in y
 """
 fs = require "fs"
 babel = require "babel-core"
