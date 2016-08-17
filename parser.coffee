@@ -413,9 +413,6 @@ api.createNamedLiteral "true",  "BooleanLiteral"
 api.createNamedLiteral "false", "BooleanLiteral"
 
 # type of operator              # name              # n/a       # precedence
-api.createTerminal              "stringLiteral"
-
-# type of operator              # name              # n/a       # precedence
 api.createPredicatedBlock       "while",                        Infinity
 
 # type of operator              # name              # n/a       # precedence
