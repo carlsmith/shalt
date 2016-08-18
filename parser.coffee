@@ -90,6 +90,11 @@ Parser = factory (self) ->
     self.createAssignmentOperator = \
         createSymbolicInfix true, "AssignmentExpression"
 
+    self.createPredicatedBlock = (name, lbp=Infinity) ->
+        self.createNamedPrefix name, lbp, upgrade (token) ->
+            token.block = []
+            token.gatherPredicatedBlock token, token.block
+
     self.createSymbolicSuffix = (name, symbol, lbp=0, handler=undefined) ->
         symbolicOperators[symbol] = name
         bindingPowers[name] = lbp
@@ -99,11 +104,6 @@ Parser = factory (self) ->
 
     self.createNamedOperatorToken = (name) ->
         self.createNamedPrefix name
-
-    self.createPredicatedBlock = (name, lbp=Infinity) ->
-        self.createNamedPrefix name, lbp, upgrade (token) ->
-            token.block = []
-            token.gatherPredicatedBlock token, token.block
 
     # The Low Level API Functions...
 
@@ -149,7 +149,7 @@ Parser = factory (self) ->
         token.advance "openBrace"
         token.gatherBlock token, target
 
-    # Define the Terminals for the Core Grammar...
+    # Define the terminals for the Core Grammar...
 
     prefixHandlers["Identifier"] = upgrade (self) ->
         self.name = self.value
@@ -215,7 +215,10 @@ Parser = factory (self) ->
 
         operatorHints = new Set(name[0] for name of symbolicOperators)
 
-        startNameChars = "$_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        # Some useful constants for checking that names are legal...
+
+        alphas = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        startNameChars = alphas + "$_"
         laterNameChars = startNameChars + "0123456789"
 
         # Helper functions...
@@ -327,7 +330,7 @@ Parser = factory (self) ->
                 escaping = false
                 updatePosition()
                 advance()
-                until (char is undefined) or (char is delimiter and not escaping)
+                until (not char) or (char is delimiter and not escaping)
                     raw += char
                     if escaping
                         word += escapees[char]
@@ -498,11 +501,6 @@ api.createGoofySymbolicPrefix "minus", "-", 150, upgrade (self) ->
     self.right = self.subparse Infinity
     self.updateEndPosition self, self.right
 
-api.createNamedPrefix "return", Infinity, upgrade (self) ->
-    self.type = "ReturnStatement"
-    self.argument = self.subparse 0
-    self.updateEndPosition self, self.argument
-
 api.createNamedPrefix "for", 0, upgrade (self) ->
     predicate = self.subparse self.lbp
     self.left = predicate.left
@@ -524,7 +522,7 @@ api.createNamedPrefix "if", 0, upgrade (self) ->
     else if statement.type is "openBrace"
         self.alternate = []
         self.gatherBlock self, self.alternate
-    else throw "ifelse error"
+    else throw "branch error"
 
 api.createNamedOperatorToken "else"
 
@@ -541,13 +539,45 @@ api.createNamedPrefix "function", 0, upgrade (self) ->
     self.advance "openBrace"
     self.gatherBlock self, self.body.body
 
+api.createNamedPrefix "generator", 0, upgrade (self) ->
+    self.type = "FunctionExpression"
+    self.generator = true
+    self.expression = false
+    self.async = false
+    self.params = []
+    self.body = type: "BlockStatement", body: []
+    unless self.peek().type is "openBrace" then loop
+        self.params.push self.subparse 0
+        if self.peek().value is "," then self.advance "endStatement" else break
+    self.advance "openBrace"
+    self.gatherBlock self, self.body.body
+
+api.createNamedPrefix "return", Infinity, upgrade (self) ->
+    self.type = "ReturnStatement"
+    self.argument = self.subparse 0
+    self.updateEndPosition self, self.argument
+
 api.createNamedPrefix "yield", 20, upgrade (self) ->
+    self.type = "YieldExpression"
     if self.peek().type is "times"
-        self.type = "yieldAll"
+        self.delegate = true
         self.value = "yield *"
         self.advance "times"
-    self.right = self.subparse self.lbp - 1
-    self.updateEndPosition self, self.right
+    else self.delegate = false
+    self.argument = self.subparse self.lbp - 1
+    self.updateEndPosition self, self.argument
+
+api.createNamedPrefix "yield", 20, upgrade (self) ->
+    self.type = "YieldExpression"
+    if self.peek().type is "from"
+        self.delegate = true
+        self.value = "yield *"
+        self.advance "from"
+    else self.delegate = false
+    self.argument = self.subparse self.lbp - 1
+    self.updateEndPosition self, self.argument
+
+api.createNamedOperatorToken "from"
 
 api.createSymbolicInfix "colon", ":", 5, upgrade (self, left) ->
     self.type = "ObjectProperty"
@@ -572,7 +602,8 @@ api.createSymbolicInfix "lambda", "->", Infinity, upgrade (self, left) ->
     self.generator = false
     self.expression = true
     self.async = false
-    if left.type is "SequenceExpression" then self.params = left.expressions
+    if left.type is "SequenceExpression"
+        self.params = left.expressions
     else self.params = [left]
     self.body = self.subparse 0
     self.updateBoundaryPositions self, left, self.body
@@ -631,7 +662,9 @@ api.createNamedInfix "not", 110, upgrade (self, left) ->
 # Test Code...
 
 source = """
-x not in y
+generator x {
+    yield from spam
+}
 """
 fs = require "fs"
 babel = require "babel-core"
