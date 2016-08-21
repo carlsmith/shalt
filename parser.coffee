@@ -1,11 +1,12 @@
 ### shlat.js | https://github.com/carlsmith/shalt
 
-    Shalt JS | Custom JavaScript Dialects
+    shaltJS | Custom JavaScript Dialects
     Carl Smith 2016 GPL3 | CoffeeScript 1.10
 
 ###
 
-# Generic Helper Functions...
+# Generic Local Helper Functions: These are shared across all files in the
+# library, but this is currently the only file in the library, so...
 
 put = (args...) -> console.log args...
 
@@ -23,11 +24,17 @@ upgrade = (mutator) -> (self, args...) ->
     mutator self, args...
     return self
 
-# The Parser API Constructor...
+# The Library Constructor: Apart from the helpers above, the whole library is
+# defined by this function. The function takes an empty object (`self`), that
+# the `factory` decorator passes to it, so users call `ShaltJS` with no args.
+# The API is bound to `self`, which `factory` also makes the return value.
 
-Parser = factory (self) ->
+ShaltJS = factory (self) ->
 
-    # Configuration State...
+    # Configuration State. This is shared across the lexer and parser, and
+    # across repeated calls to `lex` and `parse`. Each parser instance can
+    # parse any number of source strings once configured, but the instance
+    # can only parse the single dialect it has been configured for.
 
     keywords = []
     namedLiterals = {}
@@ -37,52 +44,72 @@ Parser = factory (self) ->
     infixHandlers = {}
     bindingPowers = {}
 
-    # Internal Helper Functions...
+    # Internal Helper Functions: These functions are only used internally.
+    # They use the exposed API functions (which are defined just beneath).
 
-    createSymbolicPrefix = (goofy) ->
+    handleUnaryPrefix = (goofy, lbp, type) -> upgrade (token) ->
+        token.type = type or "UnaryExpression"
+        token.operator = token.value
+        token.prefix = true
+        self.handlePotentialGroup token, token.subparse lbp - goofy
+        token.updateEndPosition token, token.argument
+
+    handleBinaryExpression = (goofy, lbp, type) -> upgrade (token, left) ->
+        token.type = type or "BinaryExpression"
+        token.operator = token.value
+        token.left = left
+        token.right = token.subparse lbp - goofy
+        self.updateBoundaryPositions token, left, token.right
+
+    createSymbolicPrefix = (goofy, type=undefined) ->
         (name, symbol, lbp=0, handler=undefined) ->
             symbolicOperators[symbol] = name
-            prefixHandlers[name] = handler or upgrade (token) ->
-                token.right = token.subparse lbp - goofy
-                token.updateEndPosition token, token.right
+            prefixHandlers[name] = handler or \
+                handleUnaryPrefix goofy, lbp, type
 
-    createSymbolicInfix = (goofy, type="BinaryExpression") ->
+    createNamedPrefix = (goofy, type=undefined) ->
+        (name, lbp=0, handler=undefined) ->
+            namedOperators.push name
+            prefixHandlers[name] = handler or \
+                handleUnaryPrefix goofy, lbp, type
+
+    createSymbolicInfix = (goofy, type=undefined) ->
         (name, symbol, lbp=0, handler=undefined) ->
             symbolicOperators[symbol] = name
             bindingPowers[name] = lbp
-            infixHandlers[name] = handler or upgrade (token, left) ->
-                token.type = type
-                token.operator = symbol
-                token.left = left
-                token.right = token.subparse token.lbp - goofy
-                self.updateBoundaryPositions token, left, token.right
+            infixHandlers[name] = handler or \
+                handleBinaryExpression goofy, lbp, type
 
-    createNamedPrefix = (goofy) ->
-        (name, lbp=0, handler=undefined) ->
-            namedOperators.push name
-            prefixHandlers[name] = handler or upgrade (token) ->
-                token.right = token.subparse lbp - goofy
-                token.updateEndPosition token, token.right
-
-    createNamedInfix = (goofy) ->
+    createNamedInfix = (goofy, type=undefined) ->
         (name, lbp=0, handler=undefined) ->
             namedOperators.push name
             bindingPowers[name] = lbp
-            infixHandlers[name] = handler or upgrade (token, left) ->
-                token.left = left
-                token.right = token.subparse token.lbp
-                self.updateBoundaryPositions token, left, token.right
+            infixHandlers[name] = handler or \
+                handleBinaryExpression goofy, lbp, type
 
-    # The High Level API Functions...
+    # The High Level API Functions: These functions can be called with a
+    # few arguments to create new operators that resuse typical grammar,
+    # for example, a new infix operator or a new predicated block. Every
+    # one of these functions accepts an optional callback, always as the
+    # last argument, that will be used by the parser to parse any tokens
+    # of the new type (instead of the default handler for that method).
+
+    self.createSymbolicTerminal = (name, symbol, handler=undefined) ->
+        symbolicOperators[symbol] = name
+        prefixHandlers[name] = handler or upgrade ->
+
+    self.createNamedTerminal = (name, handler=undefined) ->
+        namedOperators.push name
+        prefixHandlers[name] = handler or upgrade ->
 
     self.createSymbolicPrefix = createSymbolicPrefix false
     self.createGoofySymbolicPrefix = createSymbolicPrefix true
 
-    self.createSymbolicInfix = createSymbolicInfix false
-    self.createGoofySymbolicInfix = createSymbolicInfix true
-
     self.createNamedPrefix = createNamedPrefix false
     self.createGoofyNamedPrefix = createNamedPrefix true
+
+    self.createSymbolicInfix = createSymbolicInfix false
+    self.createGoofySymbolicInfix = createSymbolicInfix true
 
     self.createNamedInfix = createNamedInfix false
     self.createGoofyNamedInfix = createNamedInfix true
@@ -90,10 +117,12 @@ Parser = factory (self) ->
     self.createAssignmentOperator = \
         createSymbolicInfix true, "AssignmentExpression"
 
-    self.createPredicatedBlock = (name, lbp=Infinity) ->
-        self.createNamedPrefix name, lbp, upgrade (token) ->
-            token.block = []
-            token.gatherPredicatedBlock token, token.block
+    self.createPredicatedBlock = (name, type, handler=undefined) ->
+        self.createNamedPrefix name, 0, handler or upgrade (token) ->
+            token.type = type
+            token.complete = true
+            token.body = type: "BlockStatement", body: []
+            token.gatherPredicatedBlock token, token.body.body
 
     self.createSymbolicSuffix = (name, symbol, lbp=0, handler=undefined) ->
         symbolicOperators[symbol] = name
@@ -105,7 +134,10 @@ Parser = factory (self) ->
     self.createNamedOperatorToken = (name) ->
         self.createNamedPrefix name
 
-    # The Low Level API Functions...
+    # The Low Level API Functions: These are used inside the functions
+    # that define custom parser actions. The parser internals are also
+    # exposed by functions defined within the `parse` method, and with
+    # these functions, they form the Low Level API.
 
     self.updateStartPosition = upgrade (token, startToken) ->
         token.start = startToken.start
@@ -121,11 +153,37 @@ Parser = factory (self) ->
         self.updateStartPosition token, startToken
         self.updateEndPosition token, endToken
 
+    self.buildDeclaration = (kind, params) ->
+        type: "VariableDeclaration", kind: kind, declarations: [
+            type: "VariableDeclarator", id:
+                if params.length is 1 then params[0]
+                else type: "ArrayPattern", elements: params
+        ]
+
+    self.buildLetDeclaration = (params) -> self.buildDeclaration "let", params
+
+    self.buildVarDeclaration = (params) -> self.buildDeclaration "var", params
+
     self.handlePrefix = (token) ->
         prefixHandlers[token.type] token
 
     self.handleInfix = (token, node) ->
         infixHandlers[token.type] token, node
+
+    self.gatherNames = (token, target) ->
+        while token.peek().type in ["Identifier"]
+            target.push identifier = (token.advance "Identifier")[0]
+            identifier.name = identifier.value
+            if token.peek().value is "," then token.advance "endStatement"
+            else break
+        token.updateEndPosition token, identifier
+
+    self.gatherParams = (token, target) ->
+        while token.peek().type in ["Identifier", "RestElement"]
+            target.push param = token.subparse 0
+            if token.peek().value is "," then token.advance "endStatement"
+            else break
+        token.updateEndPosition token, param
 
     self.gatherSequence = (token, target, closer) ->
         token.ignore "endStatement"
@@ -149,13 +207,24 @@ Parser = factory (self) ->
         token.advance "openBrace"
         token.gatherBlock token, target
 
-    # Define the terminals for the Core Grammar...
+    self.handlePotentialGroup = (token, argument) ->
+        updateToken = (argument, parenthesized) ->
+            token.argument = argument
+            token.extras = parenthesizedArgument: parenthesized
+        isSequence = argument.type is "SequenceExpression"
+        if isSequence and argument.expressions.length is 1
+            updateToken argument.expressions[0], true
+        else updateToken argument, false
+
+    # Common Grammar: This section defines the literals that are common to
+    # all shaltJS dialects. Along with the whitespace rules for tokenising
+    # source code, these grammar rules should never change.
 
     prefixHandlers["Identifier"] = upgrade (self) ->
         self.name = self.value
 
-    namedLiterals["undefined"] = "UndefinedLiteral"
-    prefixHandlers["UndefinedLiteral"] = upgrade (self) ->
+    namedLiterals["undefined"] = "undefinedLiteral"
+    prefixHandlers["undefinedLiteral"] = upgrade (self) ->
         self.type = "Identifier"
         self.name = self.value
 
@@ -179,7 +248,7 @@ Parser = factory (self) ->
 
     # The Lexer Function...
 
-    self.lex = (source, filename=null) ->
+    self.lex = (source) ->
 
         # Lexer state...
 
@@ -286,7 +355,7 @@ Parser = factory (self) ->
                     else false
                 token = Token "NumericLiteral"
                 token.extra = raw: token.value, rawValue: Number token.value
-                self.value = Number token.value
+                token.value = Number token.value
                 yield token
 
             else if char is hash
@@ -369,12 +438,12 @@ Parser = factory (self) ->
             got #{token.type} #{token.value}
             """
 
-        Statement = factory (self, expression) ->
-            self.type = "ExpressionStatement"
-            self.start = expression.start
-            self.end = expression.end
-            self.loc = expression.loc
-            self.expression = expression
+        Statement = factory (statement, expression) ->
+            statement.type = "ExpressionStatement"
+            statement.start = expression.start
+            statement.end = expression.end
+            statement.loc = expression.loc
+            statement.expression = expression
 
         # Low Level API Functions...
 
@@ -407,9 +476,9 @@ Parser = factory (self) ->
 
         while (token is undefined) or (token.type isnt "endFile")
             statement = self.subparse()
-            if statement.type is "ReturnStatement" then yield statement
+            if statement.complete then yield statement
             else yield Statement statement
-            continue if statement.type is "if"
+            continue if statement.terminated
             self.advance "endStatement", "endFile"
 
     # API Wrapper Functions...
@@ -430,98 +499,92 @@ Parser = factory (self) ->
 
 # Define Core Grammar...
 
-api = Parser()
+api = ShaltJS()
 
-# type of operator              # name              # n/a       # n/a
-api.createPredicatedBlock       "while"
+api.createPredicatedBlock "while", "WhileStatement"
 
-# type of operator              # name              # n/a       # precedence
-api.createGoofyNamedPrefix      "void",                         150
-api.createGoofyNamedPrefix      "typeof",                       150
-api.createGoofyNamedPrefix      "delete",                       150
+api.createNamedPrefix "void", 150
+api.createNamedPrefix "typeof", 150
+api.createNamedPrefix "delete", 150
 
-# type of operator              # name              # n/a       # precedence
-api.createNamedInfix            "or",                           50
-api.createNamedInfix            "and",                          60
-api.createNamedInfix            "like",                         100
-api.createNamedInfix            "unlike",                       100
-api.createNamedInfix            "instanceof",                   110
-api.createNamedInfix            "in",                           110
+api.createSymbolicPrefix "not", "!", 150
+api.createSymbolicPrefix "plus", "+", 150
+api.createSymbolicPrefix "minus", "-", 150
 
-# type of operator              # name              # symbol    # precedence
-api.createSymbolicPrefix        "spread",           "...",      10
-api.createSymbolicPrefix        "not",              "!",        150
+api.createNamedInfix "instanceof", 110
+api.createNamedInfix "in", 110
 
-# type of operator              # name              # symbol    # precedence
-api.createSymbolicInfix         "apply",            "|",        10
-api.createSymbolicInfix         "more",             ">",        110
-api.createSymbolicInfix         "less",             "<",        110
-api.createSymbolicInfix         "notMore",          "<!",       110
-api.createSymbolicInfix         "notLess",          "!>",       110
-api.createSymbolicInfix         "equals",           "==",       100
-api.createSymbolicInfix         "unequals",         "!=",       100
-api.createSymbolicInfix         "plus",             "+",        130
-api.createSymbolicInfix         "minus",            "-",        130
-api.createSymbolicInfix         "times",            "*",        140
-api.createSymbolicInfix         "divide",           "/",        140
-api.createSymbolicInfix         "modulo",           "%",        140
-api.createSymbolicInfix         "dot",              ".",        180
+api.createSymbolicInfix "more", ">", 110
+api.createSymbolicInfix "less", "<", 110
+api.createSymbolicInfix "notMore", "<=", 110
+api.createSymbolicInfix "notLess", ">=", 110
+api.createSymbolicInfix "equals", "==", 100
+api.createSymbolicInfix "unequals", "!=", 100
+api.createSymbolicInfix "plus", "+", 130
+api.createSymbolicInfix "minus", "-", 130
+api.createSymbolicInfix "times", "*", 140
+api.createSymbolicInfix "divide", "/", 140
+api.createSymbolicInfix "modulo", "%", 140
+api.createSymbolicInfix "dot", ".", 180
 
-# type of operator              # name              # symbol    # precedence
-api.createGoofySymbolicInfix    "raise",            "**",       140
-api.createGoofySymbolicInfix    "not",              "!",        150
+api.createGoofySymbolicInfix "raise", "**", 140
 
-# type of operator              # name              # symbol    # precedence
-api.createGoofySymbolicPrefix   "increment",        "++",       150
-api.createGoofySymbolicPrefix   "decrement",        "--",       150
+api.createAssignmentOperator "assign", "=", 30
+api.createAssignmentOperator "plusAssign", "+=", 30
+api.createAssignmentOperator "minusAssign", "-=", 30
+api.createAssignmentOperator "timesAssign", "*=", 30
+api.createAssignmentOperator "divideAssign", "/=", 30
+api.createAssignmentOperator "moduloAssign", "%=", 30
+api.createAssignmentOperator "raiseAssign", "**=", 30
+api.createAssignmentOperator "moduloAssign", "%=", 30
 
-# type of operator              # name              # symbol    # precedence
-api.createSymbolicSuffix        "increment",        "++",       160
-api.createSymbolicSuffix        "decrement",        "--",       160
+api.createSymbolicPrefix "RestElement", "...", 0, (self) ->
+    self.argument = self.subparse self.lbp
+    self.updateEndPosition self, self.argument
 
-# type of operator              # name              # symbol    # precedence
-api.createAssignmentOperator    "assign",           "=",        30
-api.createAssignmentOperator    "plusAssign",       "+=",       30
-api.createAssignmentOperator    "minusAssign",      "-=",       30
-api.createAssignmentOperator    "timesAssign",      "*=",       30
-api.createAssignmentOperator    "divideAssign",     "/=",       30
-api.createAssignmentOperator    "moduloAssign",     "%=",       30
-api.createAssignmentOperator    "raiseAssign",      "**=",      30
-api.createAssignmentOperator    "moduloAssign",     "%=",       30
+api.createNamedInfix "or", 50, upgrade (self, left) ->
+    self.type = "LogicalExpression"
+    self.operator = "||"
+    self.left = left
+    self.right = self.subparse self.lbp
+    self.updateBoundaryPositions self, left, self.right
 
-# Define Unique Constructs...
-
-api.createGoofySymbolicPrefix "plus", "+", 150, upgrade (self) ->
-    self.type = "positive"
-    self.right = self.subparse Infinity
-    self.updateEndPosition self, self.right
-
-api.createGoofySymbolicPrefix "minus", "-", 150, upgrade (self) ->
-    self.type = "negative"
-    self.right = self.subparse Infinity
-    self.updateEndPosition self, self.right
+api.createNamedInfix "and", 60, upgrade (self, left) ->
+    self.type = "LogicalExpression"
+    self.operator = "&&"
+    self.left = left
+    self.right = self.subparse self.lbp
+    self.updateBoundaryPositions self, left, self.right
 
 api.createNamedPrefix "for", 0, upgrade (self) ->
-    predicate = self.subparse self.lbp
-    self.left = predicate.left
-    self.right = predicate.right
-    self.body = []
+    self.complete = true
+    self.gatherNames self, names = []
+    self.left = self.buildLetDeclaration names
+    nextValue = (self.advance "in", "of")[0].value
+    self.type = (if nextValue is "in" then "ForIn" else "ForOf") + "Statement"
+    self.right = self.subparse 0
     self.advance "openBrace"
-    self.gatherBlock self, self.body
+    self.body = type: "BlockStatement", body: []
+    self.gatherBlock self, self.body.body
+
+api.createNamedOperatorToken "of"
 
 api.createNamedPrefix "if", 0, upgrade (self) ->
-    self.consequent = []
-    self.gatherPredicatedBlock self, self.consequent
+    self.type = "IfStatement"
+    self.terminated = true
+    self.consequent = type: "BlockStatement", body: []
+    self.gatherPredicatedBlock self, self.consequent.body
     self.ignore "endStatement"
     return unless self.peek().type is "else"
-    self.type = "either"
     self.advance "else"
     statement = (self.advance "openBrace", "if")[0]
     if statement.type is "if"
-        self.alternate = [self.handlePrefix statement]
+        body = [self.handlePrefix statement]
+        self.alternate = type: "BlockStatement", body: body
     else if statement.type is "openBrace"
-        self.alternate = []
-        self.gatherBlock self, self.alternate
+        self.alternate = type: "BlockStatement", body: []
+        self.gatherBlock self, self.alternate.body
+        self.advance "endStatement"
     else throw "branch error"
 
 api.createNamedOperatorToken "else"
@@ -531,11 +594,8 @@ api.createNamedPrefix "function", 0, upgrade (self) ->
     self.generator = false
     self.expression = false
     self.async = false
-    self.params = []
+    self.gatherParams self, self.params = []
     self.body = type: "BlockStatement", body: []
-    unless self.peek().type is "openBrace" then loop
-        self.params.push self.subparse 0
-        if self.peek().value is "," then self.advance "endStatement" else break
     self.advance "openBrace"
     self.gatherBlock self, self.body.body
 
@@ -544,35 +604,23 @@ api.createNamedPrefix "generator", 0, upgrade (self) ->
     self.generator = true
     self.expression = false
     self.async = false
-    self.params = []
+    self.gatherParams self, self.params = []
     self.body = type: "BlockStatement", body: []
-    unless self.peek().type is "openBrace" then loop
-        self.params.push self.subparse 0
-        if self.peek().value is "," then self.advance "endStatement" else break
     self.advance "openBrace"
     self.gatherBlock self, self.body.body
 
 api.createNamedPrefix "return", Infinity, upgrade (self) ->
     self.type = "ReturnStatement"
+    self.complete = true
     self.argument = self.subparse 0
     self.updateEndPosition self, self.argument
 
 api.createNamedPrefix "yield", 20, upgrade (self) ->
     self.type = "YieldExpression"
-    if self.peek().type is "times"
+    if self.peek().value is "from"
         self.delegate = true
         self.value = "yield *"
-        self.advance "times"
-    else self.delegate = false
-    self.argument = self.subparse self.lbp - 1
-    self.updateEndPosition self, self.argument
-
-api.createNamedPrefix "yield", 20, upgrade (self) ->
-    self.type = "YieldExpression"
-    if self.peek().type is "from"
-        self.delegate = true
-        self.value = "yield *"
-        self.advance "from"
+        self.advance()
     else self.delegate = false
     self.argument = self.subparse self.lbp - 1
     self.updateEndPosition self, self.argument
@@ -608,7 +656,7 @@ api.createSymbolicInfix "lambda", "->", Infinity, upgrade (self, left) ->
     self.body = self.subparse 0
     self.updateBoundaryPositions self, left, self.body
 
-api.createSymbolicPrefix "openParen", "(", 190, upgrade (self) ->
+api.createSymbolicTerminal "openParen", "(", upgrade (self) ->
     self.type = "SequenceExpression"
     self.extra = parenthesized: true, parenStart: 0
     self.expressions = []
@@ -621,7 +669,7 @@ api.createSymbolicInfix "openParen", "(", 170, upgrade (self, left) ->
     self.gatherGroup self, self.arguments
     self.updateStartPosition self, left
 
-api.createSymbolicPrefix "openBracket", "[", 0, upgrade (self) ->
+api.createSymbolicTerminal "openBracket", "[", upgrade (self) ->
     self.type = "ArrayExpression"
     self.elements = []
     self.gatherArray self, self.elements
@@ -634,37 +682,31 @@ api.createSymbolicInfix "openBracket", "[", 180, upgrade (self, left) ->
     self.advance "closeBracket"
     self.updateBoundaryPositions self, left, self.property
 
-api.createSymbolicPrefix "openBrace", "{", 0, upgrade (self) ->
+api.createSymbolicTerminal "openBrace", "{", upgrade (self) ->
     self.type = "ObjectExpression"
     self.properties = []
     self.gatherBlock self, self.properties
 
-api.createNamedInfix "not", 110, upgrade (self, left) ->
-    self.advance "in"
-    right = self.subparse self.lbp
-    self.type = "UnaryExpression"
-    self.operator = "!"
+handlePrefixUpdateOperator = upgrade (self) ->
+    self.type = "UpdateExpression"
+    self.operator = self.value
     self.prefix = true
-    self.extra = parenthesizedArgument: true
-    self.argument = {}
-    self.argument.type = "BinaryExpression"
-    self.argument.operator = "in"
-    self.argument.left = left
-    self.argument.right = right
-    self.argument.start = left.start
-    self.argument.end = right.end
-    self.argument.loc = {
-        start: line: left.loc.start.line, column: left.loc.start.column
-        end: line: right.loc.end.line, column: right.loc.end.column
-    }
-    self.updateBoundaryPositions self, left, right
+    self.handlePotentialGroup self, self.subparse self.lbp - 1
+
+handleSuffixUpdateOperator = upgrade (self, left) ->
+    self.type = "UpdateExpression"
+    self.operator = self.value
+    self.prefix = false
+    self.handlePotentialGroup self, left
+
+api.createSymbolicPrefix "increment", "++", 150, handlePrefixUpdateOperator
+api.createSymbolicPrefix "decrement", "--", 150, handlePrefixUpdateOperator
+api.createSymbolicInfix "increment", "++", 160, handleSuffixUpdateOperator
+api.createSymbolicInfix "decrement", "--", 160, handleSuffixUpdateOperator
 
 # Test Code...
 
 source = """
-generator x {
-    yield from spam
-}
 """
 fs = require "fs"
 babel = require "babel-core"
