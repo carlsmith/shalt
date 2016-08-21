@@ -1,4 +1,4 @@
-### shlat.js | https://github.com/carlsmith/shalt
+### shalt.js | https://github.com/carlsmith/shalt
 
     shaltJS | Custom JavaScript Dialects
     Carl Smith 2016 GPL3 | CoffeeScript 1.10
